@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RX 波形查看器</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f2f5f8;color:#203347;font:15px/1.55 system-ui,"Microsoft YaHei",sans-serif}
+main{max-width:1260px;margin:24px auto;padding:0 20px}h1{margin:0;font-size:27px}p{margin:5px 0 18px;color:#586c80}
+.panel{background:white;border:1px solid #dbe3eb;border-radius:10px;padding:15px;margin-bottom:14px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:6px 0}button,select,input{font:inherit;border:1px solid #b8c6d3;border-radius:6px;padding:7px 11px;background:white;color:#203347}
+.connection-row>label{display:flex;gap:6px;align-items:center;flex:1 1 200px;min-width:180px}.connection-actions{display:inline-flex;gap:8px;align-items:center;white-space:nowrap}#port{width:100%;min-width:0}
+button{cursor:pointer}button.primary{background:#176d9c;color:white;border-color:#176d9c}button:disabled{opacity:.45;cursor:default}input[type=number]{width:85px}input[type=checkbox]{width:17px;height:17px;vertical-align:middle}label{white-space:nowrap}
+.tag{padding:3px 10px;background:#edf4fa;border-radius:20px;color:#355b78;font-size:13px}.demo{background:#fff0ca;color:#815200}
+.temperature-note{margin:8px 0;color:#60758a;font-size:13px}.temperature-note.warning{color:#8a5600;background:#fff4d6;padding:6px 10px;border-radius:6px}
+#plot{display:block;width:100%;height:420px;touch-action:none}#stats{font-variant-numeric:tabular-nums;display:flex;flex-wrap:wrap;gap:12px 24px;padding-top:6px}
+#spectrum{display:block;width:100%;height:250px}#distance{font-size:28px;font-weight:650;color:#185d89;margin:8px 0}.charthead .tag{border-radius:6px}
+#historyplot{display:block;width:100%;height:230px}button.running{background:#a33d25;border-color:#a33d25;color:white}
+#stats b{display:block;font-size:20px;color:#185d89}small{color:#60758a}#status{margin-bottom:8px}#error{color:#b52727;white-space:pre-wrap}a{color:#176d9c}.charthead{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+@media(max-width:650px){main{padding:0 10px;margin:12px auto}#plot{height:330px}h1{font-size:23px}}
+</style>
+</head>
+<body><main>
+<h1>RX 波形查看器</h1>
+<p>选择模式后单次或连续采集。每次 TX+RX 都发射有限波形；没有 NTC 时，Chirp 使用固定声速 343 m/s 作未温补估算。</p>
+<div class="panel">
+ <div class="row connection-row"><label>串口 <select id="port"><option value="">请选择 COM 口</option></select></label>
+ <button id="refresh">刷新端口</button><span class="connection-actions"><button id="connect" class="primary">连接</button><select id="language" aria-label="Language"><option value="zh">中文</option><option value="en">English</option></select></span>
+ <span class="tag">115200 · 8N1 · 3.3 V TTL</span></div>
+ <div class="row"><label>模式 <select id="mode"><option value="rx">仅接收 RX</option><option value="burst">40 kHz 短脉冲 TX+RX</option><option value="chirp">Chirp 测距 · 1024 I/Q 点</option><option value="chirp_raw">Chirp 调试 · 16384 原始 ADC 点</option></select></label><button id="continuous" class="primary" disabled>开始连续</button><button id="acquire" disabled>采集一帧</button>
+ <button id="save" disabled>保存当前帧 CSV</button><button id="demo">离线演示</button></div>
+</div>
+<div id="distancepanel" class="panel">
+ <div class="charthead"><strong id="source">尚未收到数据</strong><span id="frameinfo" class="tag">等待采样</span></div>
+ <div id="distance"></div><small id="methodinfo"></small>
+ <div id="temperatureinfo" class="temperature-note">收到帧后显示温补状态。</div>
+</div>
+<div id="wavepanel" class="panel">
+ <div class="row"><label>基带显示 <select id="signalview"><option value="magnitude">合成幅值 · 单曲线</option><option value="power">相对强度 · I²+Q²</option><option value="iq">I / Q 调试双曲线</option></select></label><label>纵轴 <select id="unit"><option value="code">数字幅值</option><option value="voltage">估算电压 V</option></select></label>
+ <label><input id="center" type="checkbox"> 去均值</label>
+ <label>VREF 假定值 <input id="vref" type="number" value="3.3" min="0.1" max="5" step="0.01"> V</label>
+ <button id="full">完整窗口</button><button id="zoom">前 0.5 ms</button><button id="near">前 3 ms 回波</button></div>
+ <canvas id="plot" aria-label="ADC 波形图"></canvas>
+ <small id="plotnote">滚轮缩放时间轴，拖动平移。横轴以本帧 RX 开始为零点，不是 TX 发射时刻。</small>
+ <div id="stats"></div>
+</div>
+<div id="historypanel" class="panel"><div class="charthead"><strong>连续距离结果 · 最近 60 秒</strong><button id="savehistory" disabled>保存距离记录 CSV</button></div><div id="historysummary" class="temperature-note">选择 Chirp 模式并点击“开始连续”，显示候选距离随时间变化。</div><canvas id="historyplot" aria-label="连续距离趋势"></canvas><small>统计描述重复读数的稳定性，不代表绝对测距精度。无效候选会留空；最多保留最近 300 帧。</small></div>
+<div id="spectrumpanel" class="panel" hidden><strong id="spectrumtitle">拍频频谱</strong><br><small>PC 根据收到的 1024 个 I/Q 点重绘。拍频和距离结果来自 MCU。功率归一化到谱峰，展示两侧谱的较强值。</small><canvas id="spectrum" aria-label="基带拍频频谱"></canvas></div>
+<div class="panel"><div id="status">正在连接本地显示服务……</div><div id="error" role="alert"></div>
+ <small id="counters">接收 0 字节 · 有效帧 0 · CRC 错误 0</small><br>
+ <small id="parserdiag" style="color:#b52727;white-space:pre-wrap"></small><br>
+ <small>Chirp 默认传 1024 对 I/Q（4,164 字节，约 0.36 s）；原始 ADC 调试帧约 2.85 s。下方计数是累计接收字节。帧间有空档；基带 I/Q 不直接换算为 ADC 引脚电压。</small>
+</div>
+</main>
+<script>
+'use strict';
+const el=id=>document.getElementById(id);
+let language='zh';try{language=localStorage.getItem('rx_viewer_language')==='en'?'en':'zh';}catch(e){}
+const translations=new Map([
+ ['RX 波形查看器','RX Waveform Viewer'],
+ ['选择模式后单次或连续采集。每次 TX+RX 都发射有限波形；没有 NTC 时，Chirp 使用固定声速 343 m/s 作未温补估算。','Select a mode for single or continuous acquisition. Each TX+RX request sends a finite burst. Without an NTC, Chirp ranging uses an uncompensated fixed speed of 343 m/s.'],
+ ['请选择 COM 口','Select a COM port'],['串口','Serial port'],['刷新端口','Refresh ports'],['连接','Connect'],['断开','Disconnect'],['模式','Mode'],
+ ['仅接收 RX','RX only'],['40 kHz 短脉冲 TX+RX','40 kHz burst TX+RX'],['Chirp 测距 · 1024 I/Q 点','Chirp range · 1024 I/Q samples'],['Chirp 调试 · 16384 原始 ADC 点','Chirp debug · 16384 raw ADC samples'],
+ ['开始连续','Start continuous'],['停止连续','Stop continuous'],['采集一帧','Capture one frame'],['保存当前帧 CSV','Save frame CSV'],['离线演示','Offline demo'],
+ ['尚未收到数据','No data received'],['等待采样','Waiting for samples'],['收到帧后显示温补状态。','Temperature status appears after a frame is received.'],
+ ['基带显示','Baseband view'],['合成幅值 · 单曲线','Magnitude · single curve'],['相对强度 · I²+Q²','Relative power · I²+Q²'],['I / Q 调试双曲线','I / Q · two debug traces'],
+ ['纵轴','Y axis'],['数字幅值','Digital amplitude'],['估算电压 V','Estimated voltage V'],['去均值','Remove mean'],['VREF 假定值','Assumed VREF'],['完整窗口','Full window'],['前 0.5 ms','First 0.5 ms'],['前 3 ms 回波','First 3 ms'],
+ ['滚轮缩放时间轴，拖动平移。横轴以本帧 RX 开始为零点，不是 TX 发射时刻。','Scroll to zoom; drag to pan. Time is relative to this RX frame, not the TX start.'],
+ ['连续距离结果 · 最近 60 秒','Continuous distance · last 60 seconds'],['保存距离记录 CSV','Save distance history CSV'],
+ ['选择 Chirp 模式并点击“开始连续”，显示候选距离随时间变化。','Select Chirp and click Start continuous to plot candidate distance over time.'],
+ ['统计描述重复读数的稳定性，不代表绝对测距精度。无效候选会留空；最多保留最近 300 帧。','Statistics describe repeatability, not absolute accuracy. Invalid candidates appear as gaps. Up to 300 recent frames are retained.'],
+ ['拍频频谱','Beat spectrum'],
+ ['PC 根据收到的 1024 个 I/Q 点重绘。拍频和距离结果来自 MCU。功率归一化到谱峰，展示两侧谱的较强值。','The PC plots the received 1024 I/Q samples. The MCU supplies the beat frequency and distance. Power is normalized to the spectral peak, and the stronger side is shown.'],
+ ['正在连接本地显示服务……','Connecting to the local viewer…'],
+ ['Chirp 默认传 1024 对 I/Q（4,164 字节，约 0.36 s）；原始 ADC 调试帧约 2.85 s。下方计数是累计接收字节。帧间有空档；基带 I/Q 不直接换算为 ADC 引脚电压。','Chirp sends 1024 I/Q pairs (4,164 bytes, about 0.36 s). Raw ADC debug frames take about 2.85 s. The byte counter is cumulative. Acquisition has gaps; baseband I/Q cannot be directly converted to ADC pin voltage.'],
+ ['没有检测到 COM 口','No COM ports detected'],['USB 串行设备','USB Serial Device'],
+ ['缺少串口依赖。请在程序目录运行：python -m pip install -r requirements.txt，然后重启程序。可以先用离线演示。','Serial dependencies are missing. Run python -m pip install -r requirements.txt in the app folder, then restart. Offline demo remains available.'],
+ ['本地服务没有响应，请保持 Python 程序窗口打开。','The local service is not responding. Keep the Python viewer process running.'],
+ ['VREF 请输入 0～5 V 范围内的数值，例如 3.3。','Enter a VREF greater than 0 and no higher than 5 V, for example 3.3.'],
+ ['连接串口并采集，或点击离线演示。','Connect and capture a frame, or select Offline demo.'],
+ ['本帧时间 / ms','Frame time / ms'],['相对强度 I²+Q² · 数字幅值²','Relative power I²+Q² · digital units²'],['合成幅值 √(I²+Q²) · 数字幅值','Magnitude √(I²+Q²) · digital units'],['基带 I（蓝）/ Q（橙）· 数字幅值','Baseband I (blue) / Q (orange) · digital units'],['估算电压 / V','Estimated voltage / V'],['ADC 码值','ADC code'],['（已去均值）',' (mean removed)'],
+ ['ADC 波形图','ADC waveform'],['连续距离趋势','Continuous distance trend'],['基带拍频频谱','Baseband beat spectrum'],
+ ['模拟数据 · 非板上实测','Simulated data · not a board measurement'],['串口实测 · ','Serial measurement · '],
+ ['模拟数据：不能用于判断实板温度。','Simulated data cannot establish board temperature.'],
+ ['未温补：外部 NTC 不可用，使用固定声速 343 m/s。显示的是频谱候选距离，尚需校准链路延迟及确认目标回波。','Uncompensated: external NTC unavailable; fixed sound speed 343 m/s. This spectral range candidate still needs delay calibration and target-echo verification.'],
+ ['外部温度不可用（NTC 未接、读数异常或过期）；本帧距离无效。','External temperature is unavailable (missing NTC, bad or stale reading). This frame has no valid range.'],
+ ['本帧补偿温度（外部 NTC）','Temperature used for sound-speed compensation (external NTC)'],
+ ['本帧已使用外部 NTC 温度补偿声速，未上报温度数值。','Sound speed was temperature-compensated. This frame did not report the temperature value.'],
+ ['温补状态冲突；本帧距离不应使用。','Conflicting temperature flags: do not use this range.'],['本帧未提供温补状态，可能来自旧固件。','No temperature status was reported; this may be older firmware.'],['本帧不携带温度状态，可正常检查接收波形。','This frame has no temperature metadata. Its waveform remains available.'],
+ ['本帧无有效候选距离','No valid range candidate in this frame'],['候选距离','Candidate distance'],
+ ['FFT 整数频点','FFT peak bin'],['FFT + 三点对数谱插值','FFT + three-point log-power interpolation'],['FFT + 局部 CZT','FFT + local CZT'],
+ ['算法信息未随本帧上报。','Algorithm metadata was not reported.'],
+ ['已混频 → 5 kHz 低通 → 16 倍抽取；31.25 kS/s，奈奎斯特频率 15.625 kHz。首点对应 ADC 第 15 点（30 µs），低通另有约 128 µs 群延迟。','Mixed → 5 kHz low-pass → decimated by 16; 31.25 kS/s, Nyquist 15.625 kHz. The first point is ADC sample 15 (30 µs); the FIR adds about 128 µs group delay.'],
+ ['原始 ADC 波形，500 kS/s。滚轮缩放、拖动平移；横轴以 RX 开始为零点。','Raw ADC waveform at 500 kS/s. Scroll to zoom; drag to pan. Time starts at RX acquisition.'],
+ ['相对强度峰值','Peak relative power'],['相对强度均值','Mean relative power'],['合成幅值峰值','Peak magnitude'],['合成幅值均值','Mean magnitude'],['原始 ADC 饱和','Raw ADC clipped'],['近零/满量程样本','Near-rail samples'],['最小值','Minimum'],['最大值','Maximum'],['平均值','Mean'],['峰峰值','Peak-to-peak'],['有','Yes'],['无','No'],
+ ['拍频 / Hz','Beat frequency / Hz'],['尚无连续距离记录。','No distance history yet.'],['暂未收到有效候选距离，保留无效记录供检查。','No valid range candidate yet. Invalid records are retained.'],['自首次接收起 / s','Time since first received frame / s'],
+ ['累计接收','Total received'],['有效帧','valid frames'],['CRC 错误','CRC errors'],['无效帧头','invalid headers'],['最近拒收原因：','Last rejected frame: '],['帧头字节：','Header bytes: '],[' 个 I/Q 点',' I/Q samples'],[' 个 ADC 点',' ADC samples'],['本帧 ','this frame '],['字节','bytes'],['帧 ','Frame '],
+ ['连续运行中','Continuous'],['已暂停','Paused'],['保留 ','Retained '],[' 帧',' frames'],[' 次/秒',' samples/s'],['最近 ','Last '],[' 个候选：均值 ',' candidates: mean '],['，标准差 ', ', SD '],
+ ['未连接。选择 COM 口后连接，点击“采集一帧”。','Disconnected. Choose a COM port, connect, then start acquisition.'],['已断开；保留最后一帧。','Disconnected; the last frame is retained.'],['已连接。请确认 MCU 正在运行，然后点击“采集一帧”。','Connected. Make sure the MCU is running, then acquire a frame.'],
+ ['等待 RX 数据……正常约 3 秒。本次不发射。','Waiting for RX data, normally about 3 s. No TX for this request.'],
+ ['已请求单次 40 kHz 短脉冲 TX+RX；等待波形约 3 秒。','Single 40 kHz TX+RX burst requested. Waveform expected in about 3 s.'],
+ ['已请求单次 Chirp；MCU 计算 Kaiser β=4 + FFT + 插值，返回 1024 个 I/Q 点，正常约 0.5 秒。','Single Chirp requested: MCU Kaiser β=4 + FFT + interpolation, 1024 I/Q samples, normally about 0.5 s.'],
+ ['已请求单次 Chirp 原始 ADC 波形；16384 点传输约 3 秒。','Single raw-ADC Chirp requested: 16384 samples, about 3 s.'],
+ ['连续测量中，已请求本次 40 kHz 短脉冲 TX+RX；等待波形约 3 秒。','Continuous: finite 40 kHz TX+RX burst requested. Waveform expected in about 3 s.'],
+ ['连续测量中，已请求本次 Chirp；MCU 计算 Kaiser β=4 + FFT + 插值，返回 1024 个 I/Q 点，正常约 0.5 秒。','Continuous: finite Chirp requested; MCU Kaiser β=4 + FFT + interpolation, 1024 I/Q samples, normally about 0.5 s.'],
+ ['已请求单次 Chirp，等待 MCU 测距结果和 1024 个 I/Q 点。','Single Chirp requested. Waiting for the MCU range result and 1024 I/Q samples.'],
+ ['连续测量中，已请求本次 Chirp，等待 MCU 测距结果和 1024 个 I/Q 点。','Continuous: finite Chirp requested. Waiting for the MCU range result and 1024 I/Q samples.'],
+ ['连续测量中，已请求本次 Chirp 原始 ADC 波形；16384 点传输约 3 秒。','Continuous: raw-ADC Chirp requested, 16384 samples, about 3 s.'],
+ ['连续测量已停止；已请求的一帧仍会接收。','Continuous acquisition stopped. The outstanding frame will still be received.'],['离线演示：合成 40 kHz 数据，不是板上采集结果。','Offline demo: synthetic 40 kHz data, not a board measurement.'],['已收到 CRC 校验通过的 ADC 帧。可放大、去均值或保存 CSV。','A CRC-verified frame was received. Zoom, inspect, or save CSV.'],
+ ['8 秒未收到完整有效帧：检查 MCU 是否运行、断点、固件、TX/RX 接线和共地，再点采集。','No complete valid frame within 8 s. Check MCU execution, breakpoints, firmware, UART wiring and common ground before retrying.'],
+ ['发送失败：','Send failed: '],['串口断开或读取失败：','Serial disconnected or read failed: '],['请求失败','Request failed'],['请先连接串口。','Connect the serial port first.'],['未知采集模式。','Unknown acquisition mode.'],['未知连续采集模式。','Unknown continuous mode.'],['命令未完整发送','Incomplete command transmission'],['端口不存在，请插入 USB-UART 并刷新端口列表。','Port unavailable. Connect the USB-UART adapter and refresh the port list.'],['请先断开串口，再查看演示数据，避免与实测混淆。','Disconnect the serial port before showing demo data.'],['缺少 pyserial。运行：python -m pip install -r requirements.txt','pyserial is missing. Run python -m pip install -r requirements.txt']
+]);
+const translationFragments=[...translations].filter(([key])=>key.length>1).sort((a,b)=>b[0].length-a[0].length);
+function tr(value){const s=String(value??'');if(language==='zh')return s;const trim=s.trim();if(translations.has(trim))return s.replace(trim,translations.get(trim));let out=s;for(const [zh,en] of translationFragments)out=out.split(zh).join(en);return out;}
+function setText(id,value){el(id).textContent=tr(value);}
+function chirpMethodLabel(algorithm) {
+ if(!Number.isInteger(algorithm)||algorithm<0||algorithm>=6) return '算法信息未随本帧上报。';
+ const windowName=algorithm<3?'Hann':'Kaiser β=4';
+ const peakMethods=['FFT 整数频点','FFT + 三点对数谱插值','FFT + 局部 CZT'];
+ return `MCU · ${windowName} · ${peakMethods[algorithm%3]}`;
+}
+function drawLabel(context,value,...position){context.fillText(tr(value),...position);}
+const staticTextNodes=[];const textWalker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+while(textWalker.nextNode()){const node=textWalker.currentNode;if(!['SCRIPT','STYLE'].includes(node.parentElement?.tagName)&&/[\u3400-\u9fff]/.test(node.nodeValue))staticTextNodes.push([node,node.nodeValue]);}
+function applyLanguage(){document.documentElement.lang=language==='en'?'en':'zh-CN';document.title=tr('RX 波形查看器');el('language').value=language;for(const [node,original] of staticTextNodes)node.nodeValue=tr(original);for(const option of el('port').options)if(option.dataset.label)option.textContent=tr(option.dataset.label);for(const [id,name] of [['plot','ADC 波形图'],['historyplot','连续距离趋势'],['spectrum','基带拍频频谱']])el(id).setAttribute('aria-label',tr(name));draw();drawHistory();poll();}
+let frame=null,revision=-1,connected=false,view=null,drag=null,polling=false,actionBusy=false,continuous=false,history=[];
+async function api(path,data){
+ const opts=data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-RX-Viewer':'1'},body:JSON.stringify(data)};
+ const response=await fetch(path,opts); const value=await response.json();
+ if(!response.ok)throw new Error(tr(value.error||'请求失败')); return value;
+}
+async function act(path,data={}){
+ if(actionBusy)return; actionBusy=true; setText('error','');
+ try{await api(path,data);await poll();}catch(e){setText('error',e.message);}
+ finally{actionBusy=false;}
+}
+async function ports(){
+ try{const data=await api('/api/ports'),selected=el('port').value;el('port').replaceChildren();
+  for(const p of data.ports){const option=document.createElement('option');option.value=p.port;option.dataset.label=p.port+' — '+p.description;option.textContent=tr(option.dataset.label);el('port').append(option);}
+  if(data.ports.some(p=>p.port===selected))el('port').value=selected;
+  if(!data.ports.length){const o=document.createElement('option');o.value='';o.dataset.label='没有检测到 COM 口';o.textContent=tr(o.dataset.label);el('port').append(o);}
+  if(!data.serial_available)setText('error','缺少串口依赖。请在程序目录运行：python -m pip install -r requirements.txt，然后重启程序。可以先用离线演示。');
+ }catch(e){setText('error',e.message);}
+}
+async function poll(){
+ if(polling)return;polling=true;
+ try{const s=await api('/api/state?revision='+revision);connected=s.connected;
+  setText('connect',connected?'断开':'连接');el('port').disabled=connected;
+  continuous=s.auto;el('acquire').disabled=!connected||s.waiting||continuous;el('mode').disabled=s.waiting||continuous;
+  el('continuous').disabled=!connected;setText('continuous',continuous?'停止连续':'开始连续');el('continuous').className=continuous?'running':'primary';if(continuous)el('mode').value=s.auto_mode;
+  history=s.history||[];el('savehistory').disabled=!history.length;drawHistory();
+  el('demo').disabled=connected;setText('status',s.status);
+  setText('counters',`累计接收 ${s.bytes_received} 字节 · 有效帧 ${s.frames_received} · CRC 错误 ${s.bad_crc} · 无效帧头 ${s.bad_headers}`);
+  setText('parserdiag',s.last_header_error?`最近拒收原因：${s.last_header_error}\n帧头字节：${s.last_header_hex}`:'');
+  if(s.frame){frame=s.frame;revision=s.revision;el('save').disabled=false;if(!view)view=[0,duration()];draw();}
+ }catch(e){setText('status','本地服务没有响应，请保持 Python 程序窗口打开。');}
+ finally{polling=false;}
+}
+function sampleOffsetMs(){return frame&&frame.payload_format===1?(frame.adc_sample_rate_hz/frame.sample_rate_hz-1)*1000/frame.adc_sample_rate_hz:0;}
+function duration(){return frame?Math.max(sampleOffsetMs()+(frame.samples.length-1)*1000/frame.sample_rate_hz,0.002):8.192;}
+function vref(){const v=Number(el('vref').value);if(!Number.isFinite(v)||v<=0||v>5)throw new Error(tr('VREF 请输入 0～5 V 范围内的数值，例如 3.3。'));return v;}
+function geometry(){const w=el('plot').clientWidth,h=el('plot').clientHeight;return{w,h,l:76,r:20,t:28,b:46,pw:w-96,ph:h-74};}
+function draw(){
+ const canvas=el('plot'),g=geometry(),dpr=window.devicePixelRatio||1;
+ canvas.width=Math.round(g.w*dpr);canvas.height=Math.round(g.h*dpr);const c=canvas.getContext('2d');c.scale(dpr,dpr);
+ c.clearRect(0,0,g.w,g.h);c.font='12px system-ui';c.fillStyle='#62768a';
+ if(!frame){drawLabel(c,'连接串口并采集，或点击离线演示。',g.l,g.t+30);return;}
+ let reference;try{reference=vref();}catch(e){setText('error',e.message);return;}
+ const raw=frame.samples,mean=raw.reduce((a,b)=>a+b,0)/raw.length,lo=Math.min(...raw),hi=Math.max(...raw);
+ const iq=frame.payload_format===1;
+ const combined=iq&&el('signalview').value!=='iq',powerView=combined&&el('signalview').value==='power';
+ el('signalview').disabled=!iq;el('center').disabled=combined;
+ el('unit').disabled=iq;el('vref').disabled=iq;
+ const volts=!iq&&el('unit').value==='voltage',center=!combined&&el('center').checked,factor=volts?reference/4095:1;
+ const values=combined?raw.map((x,i)=>powerView?x*x+frame.samples_q[i]**2:Math.hypot(x,frame.samples_q[i])):raw.map(x=>(x-(center?mean:0))*factor);
+ const qraw=iq&&!combined?frame.samples_q:[],qmean=qraw.length?qraw.reduce((a,b)=>a+b,0)/qraw.length:0,qvalues=qraw.map(x=>x-(center?qmean:0));
+ const low=Math.min(...values,...qvalues),high=Math.max(...values,...qvalues);
+ const pad=Math.max((high-low)*0.15,volts?0.001:2),ylo=combined?0:low-pad,yhi=high+pad;
+ if(!view)view=[0,duration()];const [xmin,xmax]=view;
+ const px=t=>g.l+(t-xmin)/(xmax-xmin)*g.pw,py=y=>g.t+(yhi-y)/(yhi-ylo)*g.ph;
+ c.strokeStyle='#dfe7ee';c.lineWidth=1;c.textAlign='right';
+ for(let i=0;i<=5;i++){const y=g.t+i*g.ph/5,val=yhi-i*(yhi-ylo)/5;c.beginPath();c.moveTo(g.l,y);c.lineTo(g.w-g.r,y);c.stroke();drawLabel(c,volts?val.toFixed(4):val.toFixed(1),g.l-9,y+4);}
+ c.textAlign='center';for(let i=0;i<=8;i++){const x=g.l+i*g.pw/8,t=xmin+i*(xmax-xmin)/8;c.beginPath();c.moveTo(x,g.t);c.lineTo(x,g.h-g.b);c.stroke();drawLabel(c,t.toFixed(3),x,g.h-g.b+20);}
+ drawLabel(c,'本帧时间 / ms',g.l+g.pw/2,g.h-4);c.textAlign='left';drawLabel(c,(combined?(powerView?'相对强度 I²+Q² · 数字幅值²':'合成幅值 √(I²+Q²) · 数字幅值'):(iq?'基带 I（蓝）/ Q（橙）· 数字幅值':(volts?'估算电压 / V':'ADC 码值')))+(center?'（已去均值）':''),g.l,15);
+ c.save();c.beginPath();c.rect(g.l,g.t,g.pw,g.ph);c.clip();c.strokeStyle='#176d9c';c.lineWidth=1;c.beginPath();
+ const step=1000/frame.sample_rate_hz,offset=sampleOffsetMs(),first=Math.max(0,Math.floor((xmin-offset)/step)-1),last=Math.min(raw.length-1,Math.ceil((xmax-offset)/step)+1);
+ for(let i=first;i<=last;i++){const x=px(offset+i*step),y=py(values[i]);if(i===first)c.moveTo(x,y);else c.lineTo(x,y);}c.stroke();
+ if(last-first<160){for(let i=first;i<=last;i++){c.beginPath();c.arc(px(offset+i*step),py(values[i]),2,0,2*Math.PI);c.fillStyle='#176d9c';c.fill();}}
+ if(iq&&!combined){c.strokeStyle='#c97520';c.beginPath();for(let i=first;i<=last;i++){const x=px(offset+i*step),y=py(qvalues[i]);if(i===first)c.moveTo(x,y);else c.lineTo(x,y);}c.stroke();}
+ c.restore();const simulated=frame.demo||((frame.flags&16)!==0);setText('source',simulated?'模拟数据 · 非板上实测':'串口实测 · '+((frame.flags&4)?'Chirp TX+RX':((frame.flags&2)?'TX+RX':'RX')));
+ el('source').className=simulated?'tag demo':'';
+ const chirpInfo=(frame.flags&4)?` · Chirp ${frame.chirp_start_hz/1000}-${frame.chirp_end_hz/1000} kHz / ${(frame.chirp_duration_us/1000).toFixed(2)} ms · TX@${frame.tx_start_sample}`:'';
+ const tempState=frame.temperature_status||'not_reported';
+ const tempMessages={simulated:'模拟数据：不能用于判断实板温度。',nominal:'未温补：外部 NTC 不可用，使用固定声速 343 m/s。显示的是频谱候选距离，尚需校准链路延迟及确认目标回波。',unavailable:'外部温度不可用（NTC 未接、读数异常或过期）；本帧距离无效。',compensated:'本帧已使用外部 NTC 温度补偿声速，未上报温度数值。',inconsistent:'温补状态冲突；本帧距离不应使用。',not_reported:(frame.flags&4)?'本帧未提供温补状态，可能来自旧固件。':'本帧不携带温度状态，可正常检查接收波形。'};
+ // Only v4 frames carry an ADC sample rate and a signed temperature field.
+ const hasTemperature=tempState==='compensated' && frame.adc_sample_rate_hz>0 && Number.isInteger(frame.temperature_centi_c);
+ setText('temperatureinfo',hasTemperature
+   ? `本帧补偿温度（外部 NTC） ${(frame.temperature_centi_c/100).toFixed(2)} °C`
+   : (tempMessages[tempState]||tempMessages.not_reported));
+ el('temperatureinfo').className='temperature-note'+(['nominal','unavailable','inconsistent'].includes(tempState)?' warning':'');
+ const rangeValid=(frame.flags&8)&&!['unavailable','inconsistent'].includes(tempState);
+ const rangeMm=frame.range_precise_mm??frame.range_candidate_mm;
+ const rangeInfo=(frame.flags&4)?` · MCU ${(rangeValid?'candidate '+rangeMm.toFixed(2)+' mm':'no valid range')} · beat ${(frame.beat_millihz/1000).toFixed(2)} Hz · peak/median ${(frame.peak_ratio_x100/100).toFixed(2)}× · DSP ${(frame.dsp_cycles/170000).toFixed(2)} ms`:'';
+ const bytes=(frame.adc_sample_rate_hz?66:50)+raw.length*(iq?4:2)+2;
+ setText('frameinfo',`帧 ${frame.sequence} · ${raw.length}${iq?' 个 I/Q 点':' 个 ADC 点'} · ${frame.sample_rate_hz/1000} kS/s · 本帧 ${bytes} 字节${chirpInfo}${rangeInfo}`);
+ setText('distance',(frame.flags&4)?(rangeValid?`候选距离 ${rangeMm.toFixed(2)} mm`:'本帧无有效候选距离'):'');
+ setText('methodinfo',chirpMethodLabel(frame.algorithm));
+ setText('plotnote',iq?'已混频 → 5 kHz 低通 → 16 倍抽取；31.25 kS/s，奈奎斯特频率 15.625 kHz。首点对应 ADC 第 15 点（30 µs），低通另有约 128 µs 群延迟。':'原始 ADC 波形，500 kS/s。滚轮缩放、拖动平移；横轴以 RX 开始为零点。');
+ const stats=combined?[[powerView?'相对强度峰值':'合成幅值峰值',high.toFixed(2)],[powerView?'相对强度均值':'合成幅值均值',(values.reduce((a,b)=>a+b,0)/values.length).toFixed(2)],['原始 ADC 饱和',(frame.flags&1)?'有':'无']]:[[(iq?'I 最小值':'最小值'),lo],[(iq?'I 最大值':'最大值'),hi],[(iq?'I 平均值':'平均值'),mean.toFixed(2)],[(iq?'I 峰峰值':'峰峰值'),hi-lo],[(iq?'原始 ADC 饱和':'近零/满量程样本'),iq?((frame.flags&1)?'有':'无'):raw.filter(x=>x<=15||x>=4080).length]];
+ el('stats').replaceChildren();for(const [label,value] of stats){const item=document.createElement('div'),text=document.createElement('small'),num=document.createElement('b');text.textContent=tr(label);num.textContent=tr(value);item.append(text,num);el('stats').append(item);}
+ drawSpectrum();
+}
+function drawSpectrum(){
+ const p=frame&&frame.spectrum_db;el('spectrumpanel').hidden=!p;if(!p)return;
+ setText('spectrumtitle',`拍频频谱 · ${frame.spectrum_window||'Kaiser β=4'}`);
+ const canvas=el('spectrum'),w=canvas.clientWidth,h=canvas.clientHeight,d=window.devicePixelRatio||1;
+ canvas.width=w*d;canvas.height=h*d;const c=canvas.getContext('2d');c.scale(d,d);c.font='12px system-ui';
+ const l=54,r=16,t=20,b=38,pw=w-l-r,ph=h-t-b,maxf=2000,step=frame.sample_rate_hz/frame.samples.length;
+ const px=f=>l+f/maxf*pw,py=v=>t+Math.min(80,Math.max(0,-v))/80*ph;
+ c.strokeStyle='#dfe7ee';c.fillStyle='#60758a';c.textAlign='right';
+ for(let v=0;v>=-80;v-=20){c.beginPath();c.moveTo(l,py(v));c.lineTo(w-r,py(v));c.stroke();drawLabel(c,v+' dB',l-6,py(v)+4);}
+ c.textAlign='center';for(let f=0;f<=maxf;f+=250){drawLabel(c,f,px(f),h-20);}drawLabel(c,'拍频 / Hz',l+pw/2,h-3);
+ c.strokeStyle='#176d9c';c.beginPath();for(let i=0;i<p.length&&i*step<=maxf;i++){if(i===0)c.moveTo(px(0),py(p[i]));else c.lineTo(px(i*step),py(p[i]));}c.stroke();
+ const peak=(frame.beat_millihz||0)/1000;if(peak<=maxf&&(frame.flags&8)){c.strokeStyle='#c97520';c.setLineDash([4,3]);c.beginPath();c.moveTo(px(peak),t);c.lineTo(px(peak),t+ph);c.stroke();c.setLineDash([]);c.fillStyle='#a15b0f';drawLabel(c,'MCU '+peak.toFixed(1)+' Hz',Math.max(95,Math.min(w-80,px(peak))),12);}
+}
+function drawHistory(){
+ const canvas=el('historyplot'),w=canvas.clientWidth,h=canvas.clientHeight,d=window.devicePixelRatio||1;
+ canvas.width=w*d;canvas.height=h*d;const c=canvas.getContext('2d');c.scale(d,d);c.font='12px system-ui';c.fillStyle='#60758a';
+ if(!history.length){setText('historysummary','选择 Chirp 模式并点击“开始连续”，显示候选距离随时间变化。');drawLabel(c,'尚无连续距离记录。',55,42);return;}
+ const last=history[history.length-1].elapsed_s,visible=history.filter(p=>p.elapsed_s>=last-60),valid=visible.filter(p=>p.valid&&p.range_mm!==null);
+ const recent=history.slice(-30).filter(p=>p.valid&&p.range_mm!==null),rate=history.length>1?(history.length-1)/(last-history[0].elapsed_s):0;
+ if(recent.length){const mean=recent.reduce((s,p)=>s+p.range_mm,0)/recent.length,sd=Math.sqrt(recent.reduce((s,p)=>s+(p.range_mm-mean)**2,0)/recent.length);
+ setText('historysummary',language==='en'?`${continuous?'Continuous':'Paused'} · ${history.length} retained frames · ${Number.isFinite(rate)?rate.toFixed(2):'—'} samples/s · Last ${recent.length} candidates: mean ${mean.toFixed(2)} mm, SD ${sd.toFixed(2)} mm`:`${continuous?'连续运行中':'已暂停'} · 保留 ${history.length} 帧 · ${Number.isFinite(rate)?rate.toFixed(2):'—'} 次/秒 · 最近 ${recent.length} 个候选：均值 ${mean.toFixed(2)} mm，标准差 ${sd.toFixed(2)} mm`);
+ }else setText('historysummary','暂未收到有效候选距离，保留无效记录供检查。');
+ if(!valid.length)return;
+ const l=55,r=20,t=20,b=40,pw=w-l-r,ph=h-t-b,xmin=Math.max(0,last-60),xmax=Math.max(xmin+5,last),ys=valid.map(p=>p.range_mm),pad=Math.max(5,(Math.max(...ys)-Math.min(...ys))*.15),ymin=Math.min(...ys)-pad,ymax=Math.max(...ys)+pad;
+ const px=x=>l+(x-xmin)/(xmax-xmin)*pw,py=y=>t+(ymax-y)/(ymax-ymin)*ph;
+ c.strokeStyle='#dfe7ee';c.textAlign='right';for(let i=0;i<=4;i++){const v=ymin+(ymax-ymin)*i/4;c.beginPath();c.moveTo(l,py(v));c.lineTo(w-r,py(v));c.stroke();drawLabel(c,v.toFixed(2),l-6,py(v)+4);}
+ c.textAlign='center';for(let i=0;i<=5;i++){const v=xmin+(xmax-xmin)*i/5;drawLabel(c,v.toFixed(1),px(v),h-22);}drawLabel(c,'自首次接收起 / s',l+pw/2,h-4);c.textAlign='left';drawLabel(c,'候选距离 / mm',l,13);
+ c.strokeStyle='#176d9c';c.lineWidth=1.5;c.beginPath();let pen=false;for(const p of visible){if(!p.valid||p.range_mm===null){pen=false;continue;}if(pen)c.lineTo(px(p.elapsed_s),py(p.range_mm));else c.moveTo(px(p.elapsed_s),py(p.range_mm));pen=true;}c.stroke();
+ c.fillStyle='#176d9c';for(const p of valid){c.beginPath();c.arc(px(p.elapsed_s),py(p.range_mm),2,0,2*Math.PI);c.fill();}
+}
+function clampView(start,width){const total=duration();width=Math.min(total,Math.max(width,1000/frame.sample_rate_hz*8));start=Math.min(Math.max(0,start),total-width);view=[start,start+width];draw();}
+el('plot').addEventListener('wheel',e=>{if(!frame)return;e.preventDefault();const g=geometry(),rect=el('plot').getBoundingClientRect(),fraction=Math.min(1,Math.max(0,(e.clientX-rect.left-g.l)/g.pw));const old=view[1]-view[0],width=Math.min(duration(),Math.max(1000/frame.sample_rate_hz*8,old*(e.deltaY>0?1.25:0.8)));clampView(view[0]+fraction*old-fraction*width,width);},{passive:false});
+el('plot').addEventListener('pointerdown',e=>{if(!frame)return;drag={x:e.clientX,start:view[0],width:view[1]-view[0]};el('plot').setPointerCapture(e.pointerId);});
+el('plot').addEventListener('pointermove',e=>{if(drag)clampView(drag.start-(e.clientX-drag.x)/geometry().pw*drag.width,drag.width);});
+el('plot').addEventListener('pointerup',()=>drag=null);el('plot').addEventListener('pointercancel',()=>drag=null);
+el('refresh').onclick=ports;el('connect').onclick=()=>act(connected?'/api/disconnect':'/api/connect',{port:el('port').value});
+el('acquire').onclick=()=>act('/api/request',{mode:el('mode').value});el('continuous').onclick=()=>act('/api/auto',{enabled:!continuous,mode:el('mode').value});el('demo').onclick=()=>act('/api/demo');
+el('near').onclick=()=>{view=[0,Math.min(3,duration())];draw();};
+el('unit').onchange=draw;el('center').onchange=draw;el('vref').onchange=()=>{setText('error','');draw();};
+el('signalview').onchange=draw;
+el('full').onclick=()=>{view=[0,duration()];draw();};el('zoom').onclick=()=>{view=[0,Math.min(0.5,duration())];draw();};
+ el('save').onclick=()=>{if(!frame)return;try{const ref=vref(),rows=['source,sequence,sample_rate_hz,flags,tx_start_sample,chirp_start_hz,chirp_end_hz,chirp_duration_us,range_candidate_mm,beat_millihz,peak_ratio_x100,dsp_cycles,sample_index,time_us,adc_code,vref_V,estimated_adc_voltage_V,temperature_status,range_precise_mm'];
+ const isSimulated=frame.demo||((frame.flags&16)!==0);
+ if(frame.payload_format===1){rows[0]='source,sequence,sample_rate_hz,adc_sample_rate_hz,payload_format,algorithm,sound_speed_mm_s,temperature_status,range_mm,beat_millihz,sample_index,time_us,i_code,q_code';
+ for(let i=0;i<frame.samples.length;i++)rows.push([isSimulated?'SIMULATED':'UART4',frame.sequence,frame.sample_rate_hz,frame.adc_sample_rate_hz,'IQ_S16',frame.algorithm,frame.sound_speed_mm_s,frame.temperature_status,frame.range_precise_mm==null?'':frame.range_precise_mm.toFixed(2),frame.beat_millihz,i,(sampleOffsetMs()*1000+i*1e6/frame.sample_rate_hz).toFixed(6),frame.samples[i],frame.samples_q[i]].join(','));
+ }else{
+ for(let i=0;i<frame.samples.length;i++){const code=frame.samples[i];rows.push([isSimulated?'SIMULATED':'UART4',frame.sequence,frame.sample_rate_hz,frame.flags,frame.tx_start_sample||0,frame.chirp_start_hz||0,frame.chirp_end_hz||0,frame.chirp_duration_us||0,frame.range_candidate_mm||0,frame.beat_millihz||0,frame.peak_ratio_x100||0,frame.dsp_cycles||0,i,(i*1e6/frame.sample_rate_hz).toFixed(6),code,ref,(code*ref/4095).toFixed(9),frame.temperature_status||'not_reported',frame.range_precise_mm==null?'':frame.range_precise_mm.toFixed(2)].join(','));}
+ }
+ const url=URL.createObjectURL(new Blob(['\uFEFF'+rows.join('\r\n')],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download=(isSimulated?'SIMULATED':'RX')+'_'+frame.sequence+'_'+Date.now()+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+ }catch(e){setText('error',e.message);}};
+el('savehistory').onclick=()=>{const columns=['elapsed_s','timestamp_s','sequence','range_mm','valid','beat_hz','peak_ratio','dsp_ms','temperature_status','sound_speed_mm_s','algorithm'],rows=[columns.join(',')];for(const p of history)rows.push(columns.map(k=>k==='range_mm'&&p[k]!=null?p[k].toFixed(2):(p[k]??'')).join(','));const u=URL.createObjectURL(new Blob(['\uFEFF'+rows.join('\r\n')],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=u;a.download='distance_history_'+Date.now()+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);};
+el('language').onchange=()=>{language=el('language').value;try{localStorage.setItem('rx_viewer_language',language);}catch(e){}applyLanguage();};
+window.addEventListener('resize',()=>{draw();drawHistory();});applyLanguage();ports();poll();draw();drawHistory();setInterval(poll,150);
+</script>
+</body></html>
